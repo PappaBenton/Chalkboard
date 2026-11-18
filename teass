@@ -1,0 +1,514 @@
+<form version="1.1" theme="dark">
+  <label>PowerShell Reflective Load Investigation</label>
+  <description>Detects PowerShell reflective load patterns (T1620) and provides clickable drilldowns into PowerShell, Sysmon process, process access, DLL load, network, and file activity.</description>
+  <fieldset submitButton="true" autoRun="false">
+    <input type="time" token="global_time">
+      <label>Search Time Range</label>
+      <default>
+        <earliest>-24h@h</earliest>
+        <latest>now</latest>
+      </default>
+    </input>
+    <input type="text" token="host_filter">
+      <label>Host Filter Optional</label>
+      <default>*</default>
+      <initialValue>*</initialValue>
+    </input>
+    <input type="text" token="user_filter">
+      <label>User Filter Optional</label>
+      <default>*</default>
+      <initialValue>*</initialValue>
+    </input>
+    <input type="dropdown" token="min_sev">
+      <label>Minimum Severity</label>
+      <choice value="1">Low and above (hunting)</choice>
+      <choice value="2">Medium and above (alert parity)</choice>
+      <choice value="3">Medium-high and above</choice>
+      <choice value="4">High only</choice>
+      <default>2</default>
+      <initialValue>2</initialValue>
+    </input>
+  </fieldset>
+
+  <row>
+    <panel>
+      <title>PowerShell Reflective Load Detections (one row per script block)</title>
+      <table>
+        <search>
+          <query><![CDATA[
+```T1620 - PowerShell Reflective Load Detections (per script block)```
+`WinEvent_indexes` host=$host_filter|s$
+(
+    (sourcetype IN ("WinEventLog:Microsoft-Windows-PowerShell/Operational", "WinEventLog:Microsoft-Windows-PowerShellCore/Operational") EventCode=4104)
+    OR (sourcetype="WinEventLog:Security" EventCode=4688)
+    OR sourcetype="powershell:transcription"
+)
+(assembly OR appdomain OR frombase64string OR byte)
+
+```Recover ScriptBlockId and Path from FormatMessage-broken events```
+| rex field=_raw "(?i)(?<sbid_raw>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\s*(?:path:\s*)?(?<path_raw>[a-z]:[^\r\n]*)?\s*$$"
+
+```Normalizing Fields```
+| eval host = coalesce(Computer, host, "unknown_host")
+| eval user_norm = coalesce(User, user, UserID, Sid, "unknown_user")
+| eval user_norm = case(
+      user_norm="" OR user_norm="NOT_TRANSLATED", "unknown_user",
+      user_norm="NT AUTHORITY\\SYSTEM" OR user_norm="S-1-5-18", "SYSTEM",
+      true(), user_norm)
+| eval evidence  = lower(coalesce(ScriptBlockText, Message, _raw))
+| eval ps_path   = lower(coalesce(Path, ScriptName, path_raw, ""))
+| eval sbid      = coalesce(ScriptBlockId, ScriptBlock_ID, sbid_raw)
+| eval block_key = coalesce(sbid, host.":"._cd)
+
+```Tunes - keep identical to the detection```
+| where NOT LIKE(ps_path, "c:\\windows\\ccm\\scriptstore%")
+| where NOT LIKE(ps_path, "c:\\programdata\\microsoft\\windows defender advanced threat protection\\datacollection\\%")
+| where NOT LIKE(ps_path, "c:\\program files (x86)\\citrix\\workspace environment management agent\\upmconfigcheck.ps1")
+| where NOT LIKE(ps_path, "c:\\program files\\amazon\\workspacesconfig\\scripts\\shared-utils.ps1")
+| where NOT (LIKE(ps_path, "c:\\program files\\citrix\\receiver storefront\\management\\cmdlets\\%") AND LIKE(lower(host), "%ctxf%"))
+| where NOT LIKE(ps_path, "c:\\users\\%\\onedrive - uscis\\documents\\windowspowershell\\modules\\ath-modules\\hetools.ps1")
+| where NOT LIKE(ps_path, "c:\\github\\fireeye\\maintenance\\fireeyefunctions.psm1")
+
+```Detection Logic (per event)```
+| eval has_assembly    = if(match(evidence, "reflection\.assembly|currentdomain\.load|assembly\.load"), 1, 0)
+| eval has_mem_load    = if(match(evidence, "assembly\]\s*::\s*load\s*\(|currentdomain\.load\s*\(|assembly\.load\s*\("), 1, 0)
+| eval has_b64         = if(match(evidence, "frombase64string"), 1, 0)
+| eval has_byte        = if(match(evidence, "byte\[\]|new-object\s+(system\.)?byte"), 1, 0)
+| eval has_compression = if(match(evidence, "deflatestream|gzipstream"), 1, 0)
+| eval has_exec        = if(match(evidence, "\.entrypoint"), 1, 0)
+| eval has_iex         = if(match(evidence, "invoke-expression|\biex\b"), 1, 0)
+| eval is_sccm_query   = if(match(evidence, "^(?:splunk could not get the description[\s\S]*?got the following information from this event:\s*(?:\d+\s+){0,2})?(?:creating scriptblock text \(\d+ of \d+\):\s*)?param\(\[string\]\s*\$$kustoquery,\s*\[string\]\s*\$$wmiquery,\s*\[string\]\s*\$$select\)"), 1, 0)
+| eval is_addtype_text = if(LIKE(evidence, "%add-type%offline%registry%"), 1, 0)
+
+| where has_assembly=1 OR has_b64=1 OR has_byte=1
+| rex field=evidence "(?s)(?<evidence_hit>.{0,150}(?:reflection\.assembly|currentdomain\.load|assembly\.load).{0,250})"
+
+```Aggregate per script block before gating```
+| stats min(_time) as first_seen_epoch max(_time) as last_seen_epoch
+        max(has_assembly) as has_assembly max(has_mem_load) as has_mem_load
+        max(has_b64) as has_b64 max(has_byte) as has_byte
+        max(has_compression) as has_compression max(has_exec) as has_exec max(has_iex) as has_iex
+        max(is_sccm_query) as is_sccm_query max(is_addtype_text) as is_addtype_text
+        values(ps_path) as ps_paths values(evidence_hit) as evidence_samples
+        values(sbid) as script_block_id values(sourcetype) as ps_sourcetypes values(EventCode) as ps_event_codes
+        count as ps_event_count
+  by host user_norm block_key
+
+| where has_assembly=1 AND (has_b64=1 OR has_byte=1)
+| where is_sccm_query=0
+| where NOT (is_addtype_text=1 AND has_b64=0)
+
+| eval sev_score = case(
+      has_mem_load=1 AND has_b64=1 AND has_byte=1 AND (has_compression=1 OR has_exec=1), 4,
+      has_mem_load=1 AND has_b64=1 AND has_byte=1, 3,
+      has_mem_load=1, 2,
+      true(), 1)
+| where sev_score>=$min_sev$
+| eval severity = case(sev_score=4, "high", sev_score=3, "medium_high", sev_score=2, "medium", true(), "low")
+| eval indicators = mvappend(
+      if(has_mem_load=1,    "in_memory_load",    null()),
+      if(has_b64=1,         "base64_decode",     null()),
+      if(has_byte=1,        "byte_array",        null()),
+      if(has_compression=1, "compression",       null()),
+      if(has_exec=1,        "entrypoint_invoke", null()),
+      if(has_iex=1,         "iex",               null()))
+
+```User attribution - 4104 carries no user, so take it from 4688 powershell.exe/pwsh.exe (host + script file name, else host candidates)```
+| eval link_name = lower(mvindex(split(mvindex(ps_paths, 0), "\\"), -1))
+| eval link_name = if(isnull(link_name) OR link_name="", "none", link_name)
+| append
+    [ search `WinEvent_indexes` host=$host_filter|s$ sourcetype="WinEventLog:Security" EventCode=4688 (powershell.exe OR pwsh.exe)
+      | eval host = coalesce(Computer, ComputerName, host)
+      | where match(lower(coalesce(New_Process_Name, NewProcessName, "")), "\\\\(powershell|pwsh)\.exe$$")
+      | eval cmd = lower(coalesce(Process_Command_Line, CommandLine, ""))
+      | rex field=cmd "(?<link_name>[^\\\\\s\"']+\.ps1)"
+      | fillnull value="none" link_name
+      | stats values(user) as proc_users by host link_name
+      | eval is_proc = 1 ]
+| eventstats values(proc_users) as path_users by host link_name
+| eventstats values(proc_users) as host_users by host
+| where isnull(is_proc)
+| eval user_source = case(
+      user_norm!="unknown_user", "4104",
+      link_name!="none" AND isnotnull(path_users), "4688_script_match",
+      isnotnull(host_users), "4688_host_candidates",
+      true(), "none")
+| eval user_norm = case(
+      user_source="4688_script_match",    mvjoin(path_users, ", "),
+      user_source="4688_host_candidates", "candidates: " . mvjoin(mvindex(host_users, 0, 4), ", "),
+      true(), user_norm)
+| search user_norm=$user_filter|s$
+
+| eval script_block_id  = coalesce(script_block_id, "none")
+| eval evidence_samples = mvindex(evidence_samples, 0, 4)
+
+```adding +/- 5mins for a before and after time window```
+| eval drilldown_earliest = first_seen_epoch - 300
+| eval drilldown_latest   = last_seen_epoch + 300
+| convert timeformat="%Y-%m-%d %H:%M:%S %Z" ctime(first_seen_epoch) AS first_seen ctime(last_seen_epoch) AS last_seen
+
+| sort 0 - sev_score - last_seen_epoch
+| table first_seen last_seen host user_norm user_source severity indicators script_block_id ps_event_count ps_paths evidence_samples ps_sourcetypes ps_event_codes drilldown_earliest drilldown_latest
+]]></query>
+          <earliest>$global_time.earliest$</earliest>
+          <latest>$global_time.latest$</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="dataOverlayMode">none</option>
+        <option name="drilldown">row</option>
+        <option name="refresh.display">progressbar</option>
+        <option name="rowNumbers">true</option>
+        <option name="wrap">true</option>
+        <drilldown>
+          <set token="selected_host">$row.host$</set>
+          <set token="selected_user">$row.user_norm$</set>
+          <set token="selected_severity">$row.severity$</set>
+          <set token="selected_first_seen">$row.first_seen$</set>
+          <set token="selected_last_seen">$row.last_seen$</set>
+          <set token="selected_indicators">$row.indicators$</set>
+          <set token="selected_sbid">$row.script_block_id$</set>
+          <set token="selected_earliest">$row.drilldown_earliest$</set>
+          <set token="selected_latest">$row.drilldown_latest$</set>
+          <unset token="selected_process_guid"></unset>
+          <unset token="selected_process_image"></unset>
+          <unset token="selected_process_id"></unset>
+          <unset token="selected_process_command"></unset>
+        </drilldown>
+      </table>
+    </panel>
+  </row>
+
+  <row depends="$selected_host$">
+    <panel>
+      <html>
+        <h2>Selected Detection</h2>
+        <p>
+          <b>Host:</b> $selected_host$<br/>
+          <b>User:</b> $selected_user$<br/>
+          <b>Severity:</b> $selected_severity$<br/>
+          <b>Script Block ID:</b> $selected_sbid$<br/>
+          <b>First Seen:</b> $selected_first_seen$<br/>
+          <b>Last Seen:</b> $selected_last_seen$<br/>
+          <b>Indicators:</b> $selected_indicators$
+        </p>
+      </html>
+    </panel>
+  </row>
+
+  <row depends="$selected_host$">
+    <panel>
+      <title>Raw PowerShell Evidence Around Detection</title>
+      <table>
+        <search>
+          <query><![CDATA[
+```Raw PowerShell evidence in the drilldown window (selected block first)```
+`WinEvent_indexes` host=$selected_host|s$ earliest=$selected_earliest$ latest=$selected_latest$
+sourcetype IN (
+    "WinEventLog:Microsoft-Windows-PowerShell/Operational",
+    "WinEventLog:Microsoft-Windows-PowerShellCore/Operational",
+    "powershell:transcription"
+)
+| rex field=_raw "(?i)(?<sbid_raw>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\s*(?:path:\s*)?(?<path_raw>[a-z]:[^\r\n]*)?\s*$$"
+| eval evidence   = coalesce(ScriptBlockText, Message, _raw)
+| eval evidence_l = lower(evidence)
+| eval ps_path    = coalesce(Path, ScriptName, path_raw, "")
+| eval sbid       = coalesce(ScriptBlockId, ScriptBlock_ID, sbid_raw, "")
+| eval user_norm  = coalesce(User, user, UserID, Sid, "unknown_user")
+| eval user_norm  = case(
+      user_norm="" OR user_norm="NOT_TRANSLATED", "unknown_user",
+      user_norm="NT AUTHORITY\\SYSTEM" OR user_norm="S-1-5-18", "SYSTEM",
+      true(), user_norm)
+
+| eval has_assembly = if(match(evidence_l, "reflection\.assembly|currentdomain\.load|assembly\.load"), 1, 0)
+| eval has_mem_load = if(match(evidence_l, "assembly\]\s*::\s*load\s*\(|currentdomain\.load\s*\(|assembly\.load\s*\("), 1, 0)
+| eval has_b64      = if(match(evidence_l, "frombase64string"), 1, 0)
+| eval has_byte     = if(match(evidence_l, "byte\[\]|new-object\s+(system\.)?byte"), 1, 0)
+
+```Per-event view of the detection gate; later parts of a split block can show no```
+| eval matched_detection_logic = if(has_mem_load=1 AND (has_b64=1 OR has_byte=1), "yes", "no")
+| eval selected_block = if(sbid!="" AND sbid=$selected_sbid|s$, "yes", "no")
+| eval match_priority = case(selected_block="yes", 2, matched_detection_logic="yes", 1, true(), 0)
+
+| sort 0 - match_priority _time
+| table _time host user_norm sourcetype EventCode sbid MessageNumber MessageTotal selected_block ps_path has_assembly has_mem_load has_b64 has_byte matched_detection_logic evidence
+]]></query>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+        <option name="rowNumbers">true</option>
+        <option name="wrap">true</option>
+      </table>
+    </panel>
+  </row>
+
+  <row depends="$selected_host$">
+    <panel>
+      <title>Sysmon Process Creation Around Detection (click a row to pivot)</title>
+      <table>
+        <search>
+          <query><![CDATA[
+```Sysmon EID 1 - process creation in the drilldown window```
+`sysmon_indexes` host=$selected_host|s$
+sourcetype="WinEventLog:Microsoft-Windows-Sysmon/Operational"
+EventCode=1
+earliest=$selected_earliest$
+latest=$selected_latest$
+
+| eval image_l = lower(Image)
+| eval is_powershell = if(match(image_l, "\\\\(powershell|pwsh)\\.exe$$"), "yes", "no")
+
+| sort 0 - is_powershell _time
+| table _time host User Image CommandLine ParentImage ParentCommandLine CurrentDirectory ProcessGuid ProcessId is_powershell
+]]></query>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">row</option>
+        <option name="rowNumbers">true</option>
+        <option name="wrap">true</option>
+        <drilldown>
+          <set token="selected_process_guid">$row.ProcessGuid$</set>
+          <set token="selected_process_image">$row.Image$</set>
+          <set token="selected_process_id">$row.ProcessId$</set>
+          <set token="selected_process_command">$row.CommandLine$</set>
+        </drilldown>
+      </table>
+    </panel>
+  </row>
+
+  <row depends="$selected_process_guid$">
+    <panel>
+      <html>
+        <h2>Selected Process</h2>
+        <p>
+          <b>ProcessGuid:</b> $selected_process_guid$<br/>
+          <b>Image:</b> $selected_process_image$<br/>
+          <b>ProcessId:</b> $selected_process_id$<br/>
+          <b>CommandLine:</b> $selected_process_command|h$
+        </p>
+      </html>
+    </panel>
+  </row>
+
+  <row depends="$selected_process_guid$">
+    <panel>
+      <title>Sysmon Process Access - Selected Process as Source or Target</title>
+      <table>
+        <search>
+          <query><![CDATA[
+```Sysmon EID 10 - process access involving the selected process```
+`sysmon_indexes` host=$selected_host|s$
+sourcetype="WinEventLog:Microsoft-Windows-Sysmon/Operational"
+EventCode=10
+earliest=$selected_earliest$
+latest=$selected_latest$
+(SourceProcessGUID=$selected_process_guid|s$ OR TargetProcessGUID=$selected_process_guid|s$)
+
+| eval process_match = case(
+      SourceProcessGUID=$selected_process_guid|s$, "selected_is_source",
+      TargetProcessGUID=$selected_process_guid|s$, "selected_is_target",
+      true(), "other")
+
+| table _time host process_match SourceUser SourceImage SourceProcessGUID SourceProcessId TargetImage TargetProcessGUID TargetProcessId GrantedAccess CallTrace
+| sort 0 _time
+]]></query>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+        <option name="rowNumbers">true</option>
+        <option name="wrap">true</option>
+      </table>
+    </panel>
+  </row>
+
+  <row depends="$selected_process_guid$">
+    <panel>
+      <title>Credential Access Related Process Activity (host-wide)</title>
+      <table>
+        <search>
+          <query><![CDATA[
+```Sysmon EID 10 - access to credential-sensitive processes on the host```
+`sysmon_indexes` host=$selected_host|s$
+sourcetype="WinEventLog:Microsoft-Windows-Sysmon/Operational"
+EventCode=10
+earliest=$selected_earliest$
+latest=$selected_latest$
+TargetImage IN ("*\\lsass.exe", "*\\winlogon.exe", "*\\services.exe", "*\\csrss.exe")
+
+| eval target_l = lower(TargetImage)
+| eval risk = case(
+      match(target_l, "\\\\lsass\\.exe$$"),    "critical",
+      match(target_l, "\\\\winlogon\\.exe$$"), "high",
+      match(target_l, "\\\\csrss\\.exe$$"),    "high",
+      match(target_l, "\\\\services\\.exe$$"), "medium-high",
+      true(), "medium")
+| eval process_match = if(SourceProcessGUID=$selected_process_guid|s$, "selected_process", "same_host_time_window")
+
+| table _time host risk process_match SourceUser SourceImage SourceProcessGUID SourceProcessId TargetImage TargetProcessId GrantedAccess CallTrace
+| sort 0 _time
+]]></query>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+        <option name="rowNumbers">true</option>
+        <option name="wrap">true</option>
+      </table>
+    </panel>
+  </row>
+
+  <row depends="$selected_process_guid$">
+    <panel>
+      <title>Sysmon DLL / Image Loads - Selected Process</title>
+      <table>
+        <search>
+          <query><![CDATA[
+```Sysmon EID 7 - image loads by the selected process (in-memory Assembly.Load does not appear here)```
+`sysmon_indexes` host=$selected_host|s$
+sourcetype="WinEventLog:Microsoft-Windows-Sysmon/Operational"
+EventCode=7
+earliest=$selected_earliest$
+latest=$selected_latest$
+ProcessGuid=$selected_process_guid|s$
+
+| eval loaded_l = lower(ImageLoaded)
+| eval clr_related = if(
+      LIKE(loaded_l, "%\\clr.dll")
+      OR LIKE(loaded_l, "%\\clrjit.dll")
+      OR LIKE(loaded_l, "%\\mscoree.dll")
+      OR LIKE(loaded_l, "%\\mscorlib.dll")
+      OR LIKE(loaded_l, "%\\system.private.corelib.dll"),
+      "yes", "no")
+
+| table _time host Image ImageLoaded clr_related Signed Signature Hashes ProcessGuid ProcessId
+| sort 0 _time
+]]></query>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+        <option name="rowNumbers">true</option>
+        <option name="wrap">true</option>
+      </table>
+    </panel>
+  </row>
+
+  <row depends="$selected_process_guid$">
+    <panel>
+      <title>Sysmon Network Connections Around Detection</title>
+      <table>
+        <search>
+          <query><![CDATA[
+```Sysmon EID 3 - network connections on the host (selected process first)```
+`sysmon_indexes` host=$selected_host|s$
+sourcetype="WinEventLog:Microsoft-Windows-Sysmon/Operational"
+EventCode=3
+earliest=$selected_earliest$
+latest=$selected_latest$
+
+| eval process_match = if(ProcessGuid=$selected_process_guid|s$, "selected_process", "same_host_time_window")
+| eval match_rank = if(process_match="selected_process", 1, 0)
+
+| sort 0 - match_rank _time
+| table _time host process_match User Image SourceIp SourcePort DestinationIp DestinationHostname DestinationPort Protocol ProcessGuid ProcessId
+]]></query>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+        <option name="rowNumbers">true</option>
+        <option name="wrap">true</option>
+      </table>
+    </panel>
+  </row>
+
+  <row depends="$selected_process_guid$">
+    <panel>
+      <title>Sysmon File Activity Around Detection</title>
+      <table>
+        <search>
+          <query><![CDATA[
+```Sysmon EID 11/15 - file creation and ADS on the host (selected process first)```
+`sysmon_indexes` host=$selected_host|s$
+sourcetype="WinEventLog:Microsoft-Windows-Sysmon/Operational"
+EventCode IN (11, 15)
+earliest=$selected_earliest$
+latest=$selected_latest$
+
+| eval process_match = if(ProcessGuid=$selected_process_guid|s$, "selected_process", "same_host_time_window")
+| eval match_rank = if(process_match="selected_process", 1, 0)
+
+| sort 0 - match_rank _time
+| table _time host process_match EventCode Image TargetFilename Hashes ProcessGuid ProcessId
+]]></query>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+        <option name="rowNumbers">true</option>
+        <option name="wrap">true</option>
+      </table>
+    </panel>
+  </row>
+
+  <row depends="$selected_process_guid$">
+    <panel>
+      <title>Suspicious Process Names Around Detection</title>
+      <table>
+        <search>
+          <query><![CDATA[
+```Sysmon EID 1 - script hosts and LOLBins on the host in the window```
+`sysmon_indexes` host=$selected_host|s$
+sourcetype="WinEventLog:Microsoft-Windows-Sysmon/Operational"
+EventCode=1
+earliest=$selected_earliest$
+latest=$selected_latest$
+(
+    Image="*\\powershell.exe"
+    OR Image="*\\pwsh.exe"
+    OR Image="*\\cmd.exe"
+    OR Image="*\\wscript.exe"
+    OR Image="*\\cscript.exe"
+    OR Image="*\\mshta.exe"
+    OR Image="*\\rundll32.exe"
+    OR Image="*\\regsvr32.exe"
+    OR Image="*\\installutil.exe"
+    OR Image="*\\msbuild.exe"
+    OR Image="*\\regasm.exe"
+    OR Image="*\\regsvcs.exe"
+    OR Image="*\\wmic.exe"
+    OR Image="*\\certutil.exe"
+    OR Image="*\\bitsadmin.exe"
+)
+
+| table _time host User Image CommandLine ParentImage ParentCommandLine ProcessGuid ParentProcessGuid ProcessId Hashes
+| sort 0 _time
+]]></query>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+        <option name="rowNumbers">true</option>
+        <option name="wrap">true</option>
+      </table>
+    </panel>
+  </row>
+
+  <row depends="$selected_host$">
+    <panel>
+      <title>Useful Manual Drilldown Searches</title>
+      <html>
+        <p>Copy/paste these into Search if you want to pivot manually.</p>
+
+        <h3>Full Script Block (all parts, including FormatMessage-broken events)</h3>
+        <pre>`WinEvent_indexes` host="$selected_host$" earliest=$selected_earliest$ latest=$selected_latest$ "$selected_sbid$"</pre>
+
+        <h3>PowerShell Evidence</h3>
+        <pre>`WinEvent_indexes` host="$selected_host$" earliest=$selected_earliest$ latest=$selected_latest$ sourcetype IN ("WinEventLog:Microsoft-Windows-PowerShell/Operational","WinEventLog:Microsoft-Windows-PowerShellCore/Operational","powershell:transcription","WinEventLog:Security")</pre>
+
+        <h3>Sysmon Process</h3>
+        <pre>`sysmon_indexes` host="$selected_host$" earliest=$selected_earliest$ latest=$selected_latest$ sourcetype="WinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=1</pre>
+
+        <h3>Sysmon Network</h3>
+        <pre>`sysmon_indexes` host="$selected_host$" earliest=$selected_earliest$ latest=$selected_latest$ sourcetype="WinEventLog:Microsoft-Windows-Sysmon/Operational" EventCode=3</pre>
+
+        <h3>Selected ProcessGuid</h3>
+        <pre>`sysmon_indexes` host="$selected_host$" "$selected_process_guid$" earliest=$selected_earliest$ latest=$selected_latest$</pre>
+      </html>
+    </panel>
+  </row>
+</form>
