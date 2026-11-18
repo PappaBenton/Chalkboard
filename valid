@@ -1,0 +1,139 @@
+# T1620 Reflective Load – Detection Validation
+
+Benign emulation for the **T1620 – PowerShell Reflective Assembly Load (v3)** detection. The "payload" is a small console app built on the test host that only prints a marker line. Nothing is downloaded, and nothing persists after cleanup.
+
+## Pre-checks
+- **Test host is not excluded.** It must not match `%ctxf%`, and the scripts must not run from any excluded path. `%TEMP%` and `C:\T1620Test` are fine.
+- **Windows PowerShell 5.1 (`powershell.exe`).** The setup step needs `Add-Type -OutputType ConsoleApplication`, which PowerShell 7 doesn't support.
+- **Script Block Logging is enabled** on the host (EID 4104).
+- **The SOC / EDR owners know.** CrowdStrike or Defender may flag the reflective load. A CS detection is useful corroboration, not a problem. If AMSI blocks execution, the 4104 is still written, because logging happens before execution.
+- **Run each test as its own `-File` invocation.** If you paste several tests into one console input, they become **one** script block and the results get mixed together.
+
+Save each block below as its own `.ps1` in a test folder (for example `C:\T1620Test`), then run them in order:
+
+```
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\T1620Test\<script>.ps1
+```
+
+## Setup – build the benign marker assembly (`t1620_setup.ps1`)
+This doesn't trigger the detection: there's no `Load(` call.
+
+$src = @'
+public static class T1620Marker
+{
+    public static void Main(string[] args)
+    {
+        System.Console.WriteLine("T1620 validation marker - benign");
+    }
+}
+'@
+Add-Type -TypeDefinition $src -OutputAssembly "$env:TEMP\t1620_marker.exe" -OutputType ConsoleApplication
+"Built: $env:TEMP\t1620_marker.exe"
+
+
+
+## Test A – base64 + byte array + in-memory load (`t1620_testA.ps1`)
+**Expected:** alert, severity **medium_high**.
+
+# T1620 validation A
+$b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes("$env:TEMP\t1620_marker.exe"))
+[byte[]]$bytes = [Convert]::FromBase64String($b64)
+$asm = [System.Reflection.Assembly]::Load($bytes)
+"Loaded in memory: " + $asm.FullName
+
+
+
+## Test B – gzip + base64 + byte array + load + EntryPoint invoke (`t1620_testB.ps1`)
+**Expected:** alert, severity **high**. This is the classic stager shape.
+
+# T1620 validation B
+$raw = [IO.File]::ReadAllBytes("$env:TEMP\t1620_marker.exe")
+$ms  = New-Object IO.MemoryStream
+$gz  = New-Object IO.Compression.GzipStream($ms, [IO.Compression.CompressionMode]::Compress)
+$gz.Write($raw, 0, $raw.Length)
+$gz.Close()
+$b64 = [Convert]::ToBase64String($ms.ToArray())
+
+$in  = New-Object IO.MemoryStream(,[Convert]::FromBase64String($b64))
+$gz2 = New-Object IO.Compression.GzipStream($in, [IO.Compression.CompressionMode]::Decompress)
+$out = New-Object IO.MemoryStream
+$gz2.CopyTo($out)
+[byte[]]$bytes = $out.ToArray()
+
+$asm = [System.Reflection.Assembly]::Load($bytes)
+$asm.EntryPoint.Invoke($null, [object[]]@(,[string[]]@()))
+
+
+
+
+## Test C – negative control: disk load (`t1620_testC.ps1`)
+**Expected:** **no** alert. The block has base64 and a byte array too, so the only difference from Test A is that `LoadFile` loads from disk. This proves the in-memory gate (`has_mem_load`) is what decides.
+
+# T1620 validation C - negative control
+$null = [Convert]::FromBase64String("VDE2MjA=")
+[byte[]]$bytes = [IO.File]::ReadAllBytes("$env:TEMP\t1620_marker.exe")
+$asm = [System.Reflection.Assembly]::LoadFile("$env:TEMP\t1620_marker.exe")
+"Loaded from disk: " + $asm.Location
+
+
+
+
+## Test D – split script block (`t1620_testD_build.ps1`)
+**Expected:** alert, severity **medium_high**, with `ps_event_count` > 1.
+
+This builds a large script (about 130 KB), so PowerShell logs it as several 4104 parts. The load call ends up in part 1 and `FromBase64String` in the last part. Only the per-block aggregation catches it; v1 would have missed it. The builder splits up the trigger strings so it doesn't fire the detection itself.
+
+# Builder - does not trigger (trigger strings are concatenated)
+$b64  = [Convert]::ToBase64String([IO.File]::ReadAllBytes("$env:TEMP\t1620_marker.exe"))
+$load = '[System.Reflection.Assembly]::' + 'Lo' + 'ad($b)'
+$from = '[Convert]::From' + 'Base64String'
+$bt   = '[by' + 'te[]]'
+
+$lines = New-Object System.Collections.Generic.List[string]
+$lines.Add('# T1620 validation D - split script block')
+$lines.Add('function Invoke-T1620Load { param($b) ' + $load + ' }')
+1..1000 | ForEach-Object { $lines.Add('# padding ' + ('A' * 120)) }
+$lines.Add($bt + '$bytes = ' + $from + "('" + $b64 + "')")
+$lines.Add('$asm = Invoke-T1620Load $bytes')
+$lines.Add('"Loaded in memory: " + $asm.FullName')
+Set-Content -Path "$env:TEMP\t1620_testD_payload.ps1" -Value $lines
+"Built: $env:TEMP\t1620_testD_payload.ps1"
+
+
+
+
+Then run the generated payload:
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File %TEMP%\t1620_testD_payload.ps1
+
+
+
+
+## Checking results
+Allow for ingestion lag, then run the alert and the dashboard over the last 60 minutes, filtered to the test host.
+
+| Test | Expected | Where to confirm |
+|---|---|---|
+| Setup | No hit | – |
+| A | medium_high | Dashboard row: `in_memory_load, base64_decode, byte_array` |
+| B | high | Dashboard row: adds `compression, entrypoint_invoke` |
+| C | **No hit** | No dashboard row with path `t1620_testC.ps1` |
+| D | medium_high, `ps_event_count` > 1 | Raw PowerShell Evidence panel: same `sbid` across parts, `MessageTotal` > 1 |
+| D builder | No hit | No row with path `t1620_testD_build.ps1` |
+
+- **The alert** rolls up per host/user, so all tests together produce **one row** with severity **high** and `script_block_count` = **3** (A, B, D).
+- **The dashboard** (Minimum Severity = *Low and above*) shows one row per script block, so you can check each test separately.
+- **Hidden failure:** a row for Test C, or a missing row for Test D, is the real problem to look for.
+
+## Cleanup
+Close the PowerShell windows first, since the marker file stays locked while a process has it loaded. Then:
+
+Remove-Item "$env:TEMP\t1620_marker.exe", "$env:TEMP\t1620_testD_payload.ps1" -ErrorAction SilentlyContinue
+Remove-Item C:\T1620Test -Recurse -ErrorAction SilentlyContinue
+
+
+
+
+
+## Ground truth
+Keep Test B and Test D as your known-good events. Re-run them after any structural change to the detection, and re-run Test C to confirm it still stays quiet.
