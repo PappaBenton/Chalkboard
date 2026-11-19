@@ -1,0 +1,96 @@
+Create a concise, Git-ready Markdown triage and investigation guide for one detection.
+
+INPUTS (use these values exactly; never reuse values from earlier guides in this chat)
+- MITRE ATT&CK ID: [FILL IN]
+- Technique Name: [FILL IN]
+- Detection Name: [FILL IN]
+- Detection logic screenshot: attached (optional). If attached, base the Detection Logic
+  summary and the artifacts you reference on the logic shown. Do not make up field
+  names, indexes or lookups.
+
+AUDIENCE
+Experienced Incident Response analysts. Keep it practical and concise. Do not give
+long explanations.
+
+AVAILABLE ANALYST TOOLS
+- Splunk for host and network event logs
+- Trellix Endpoint Security and Redline for endpoint triage and browser-history acquisition
+- CrowdStrike Falcon, including Real-Time Response
+- Out-of-band Windows and Linux VMs with open-source static and dynamic file-analysis tools
+
+REQUIREMENTS
+1. Use the exact heading structure in the template below.
+2. Write suspicious or malicious artifacts as angle-bracket variables, such as
+   `<hostname>`, `<username>`, `<process_name>`, `<command_line>`, `<file_path>`,
+   `<file_hash>`, `<remote_domain>`, `<remote_ip_address>`, `<malicious_url>`.
+   Do not use real atomic IOCs (URLs, hashes, IPs, domains, filenames, paths,
+   usernames, hostnames). Native OS binaries, built-in tools and Event IDs that are
+   part of the technique are not atomic IOCs and may be named.
+3. Make every triage and investigation action specific to the technique.
+4. Include validation steps for identifying approved or expected activity.
+5. Include Splunk, Trellix/Redline, CrowdStrike Falcon and out-of-band analysis
+   actions where they fit.
+6. Include containment and escalation only when malicious activity is confirmed or
+   strongly suspected.
+7. Include realistic known false positives and malicious behaviors specific to the
+   technique.
+8. Include one concise example that contains no atomic IOCs.
+
+GITHUB FORMATTING RULES
+- Wrap every angle-bracket variable in backticks everywhere: headings, lists and the
+  Example. GitHub removes a bare <variable> as HTML, so it would disappear.
+- Text inside {{ }} in the template is an instruction for you. Replace it with real
+  content. Never output the {{ }} or the instruction text.
+- Write checklist items exactly as "- [ ] " (dash, space, brackets with a space
+  inside, space).
+- Put one blank line before and after every heading and every list.
+- Do not use HTML tags, emojis or horizontal rules.
+- Output the finished guide inside a single ````markdown code block, with nothing
+  before or after it, so the raw Markdown can be pasted straight into GitHub.
+
+TEMPLATE
+```markdown
+# Detection Name: `{{Detection Name}}`
+
+[DaC Repository](DAC_LINK_HERE)
+
+**MITRE ATT&CK:** `{{MITRE ATT&CK ID}}` – {{Technique Name}}
+
+**Detection Logic:** {{One to two sentences: what the detection identifies and why it may be suspicious.}}
+
+## Triage & Investigation Steps
+
+### 1. Initial Triage
+
+- [ ] Identify `<hostname>`, `<username>`, `<process_name>`, parent process, command line, and alert time.
+- [ ] {{Technique-specific artifacts to collect, such as `<file_path>`, `<registry_key>`, `<service_name>`, `<remote_domain>`, or `<scheduled_task_name>`.}}
+- [ ] Determine whether the activity is associated with an approved tool, authorized administrator activity, business application, or other expected workflow.
+- [ ] Review Splunk, Trellix, and CrowdStrike telemetry for related activity on `<hostname>` and by `<username>`.
+- [ ] If confirmed benign, document the validation and route to SADOM for tuning consideration. Otherwise, continue investigation.
+
+### 2. Investigation
+
+- [ ] Review the full process tree and execution origin.
+- [ ] Review relevant command-line arguments, process metadata, file paths, registry entries, network connections, or authentication events related to {{Technique Name}}.
+- [ ] {{One or two technique-specific investigation steps.}}
+- [ ] Identify activity preceding and following the alert that may indicate execution, persistence, discovery, credential access, lateral movement, collection, command and control, or exfiltration.
+- [ ] Review network telemetry for connections to `<remote_domain>`, `<remote_ip_address>`, or `<malicious_url>`, where applicable.
+- [ ] Use CrowdStrike and Trellix telemetry to identify related process execution, file activity, browser downloads, persistence, credential access, or lateral movement.
+- [ ] Search Splunk across the environment for related activity using relevant artifacts, such as `<process_name>`, `<command_line_pattern>`, `<file_hash>`, `<remote_domain>`, or `<remote_ip_address>`.
+- [ ] If needed, acquire `<suspicious_file>` or other relevant artifacts using approved tools and analyze them in the out-of-band environment.
+- [ ] Initiate incident-response procedures and containment if malicious activity is confirmed or strongly suspected.
+
+## Known False Positives
+
+- {{Approved tools, authorized workflows, or normal administrative and business activity that could trigger this detection.}}
+- {{Other technique-specific benign explanations.}}
+
+## Malicious Behaviors
+
+- {{Suspicious or malicious activity associated with the technique.}}
+- {{Related attacker objectives or follow-on behavior to investigate.}}
+
+## Example
+
+`<suspicious_process>` executes on `<hostname>` under `<username>` and {{technique-specific activity, using backticked variables}}. Related telemetry shows {{related suspicious activity}} and communication with `<remote_domain>`. Investigate as potential {{suspected malicious objective}}.
+```
