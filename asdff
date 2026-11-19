@@ -1,16 +1,20 @@
 Create a concise, Git-ready Markdown triage and investigation guide for one detection.
 
-INPUTS
-- MITRE ATT&CK ID:
-- Technique Name:
-- Detection Name:
-- DaC Link:
-- Detection logic screenshot: attached (optional)
+INPUT
+- Screenshot of the Splunk detection logic (attached). It contains only the SPL, with
+  no detection name or links.
 
-Use the input values exactly as written, with no brackets added around them. Treat this
-detection as new and separate: never reuse content from earlier guides in this chat.
-If a screenshot is attached, base the Detection Logic summary and the artifacts you
-reference on the logic shown. Do not make up field names, indexes or lookups.
+HEADER VALUES (never leave any of them blank)
+- Detection Name: write exactly DETECTION_NAME
+- DaC Link: write exactly DAC_LINK
+- MITRE ATT&CK ID and Technique Name: identify the most likely technique from the
+  logic in the screenshot. Use the official MITRE ATT&CK ID and name. For
+  sub-techniques use "Parent Technique: Sub-technique". If the technique cannot be
+  determined, write TECHNIQUE_ID and TECHNIQUE_NAME.
+
+Treat this detection as new and separate: never reuse content from earlier guides in
+this chat. Base the Detection Logic summary and the artifacts you reference only on
+the logic shown in the screenshot. Do not make up field names, indexes or lookups.
 
 AUDIENCE
 Experienced Incident Response analysts. Keep it practical and concise. Do not give
@@ -54,9 +58,9 @@ FORMATTING RULES
 
 TEMPLATE
 ```markdown
-# Detection Name: {{Detection Name}}
+# Detection Name: DETECTION_NAME
 
-[DaC Repository]({{DaC Link}})
+[DaC Repository](DAC_LINK)
 
 **MITRE ATT&CK:** {{MITRE ATT&CK ID}} – {{Technique Name}}
 
