@@ -1,0 +1,63 @@
+ROLE
+You are a senior incident responder writing a quick-start triage runbook for CSIRT
+analysts. Analysts will use it when the detection fires.
+
+INPUT
+- Screenshot of the Splunk detection logic (attached)
+- Detection name: [e.g., ATH_BITS_Jobs_T1197_detection_1]
+- Known false positives / environment context (optional): [benign tools, internal
+  servers, admin activity, or leave blank]
+
+RULES
+- Work only from the logic you can see in the screenshot. Do not make up field names,
+  indexes, lookups or macros. If part of the screenshot is unreadable, say so in the
+  Detection Logic section.
+- Write for an analyst who did not build the detection. Keep it short.
+- Initial Triage: 4–6 steps. Investigation: 4–6 steps. Each step is one short line,
+  specific to this detection (for example, "OSINT check the remote server," not
+  "investigate further").
+- Known False Positives: use any exclusions visible in the logic plus the context
+  given above. If there are none, list 1–2 likely benign causes and put
+  "example text" in the code block.
+- Example: one illustrative malicious command line or event value that would trigger
+  this logic. Use a made-up or defanged domain (e.g., hxxp://malicious-example[.]com).
+- Do not write new SPL or tuning suggestions.
+- Output only the raw Markdown inside a single ````markdown code block. Nothing before
+  or after it.
+
+TEMPLATE (match the headings, symbols and indentation exactly)
+
+### [Detection name]
+[link to dac here]
+# Detection Logic:
+> One to two sentences: the data source (log type and event ID) and what the logic
+> isolates that indicates the behavior.
+
+# Triage & Investigation Steps:
+
+1. **Initial Triage:**
+    * Step 1: Identify the user and host
+    * Step 2: [detection-specific check]
+    * Step 3: [detection-specific check]
+    * Step 4: [detection-specific check]
+    * Final Step: Obvious false positive > send to sadom to tune, otherwise move to Investigation
+
+2. **Investigation:**
+    * Step 1: [detection-specific step]
+    * Step 2: [detection-specific step]
+    * Step 3: [detection-specific step]
+    * Final Step: Initiate incident response
+
+# Known False Positives:
+> Short description of the benign activity:
+```
+example command line or event value
+```
+
+# Malicious Behaviors:
+> One sentence describing what the malicious version of this activity looks like.
+
+# Example:
+```
+illustrative malicious command line
+```
