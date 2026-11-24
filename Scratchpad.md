@@ -13,6 +13,8 @@ Quick capture for thoughts, questions, and ideas that aren't organized yet.
 ## Questions to Revisit
 
 - 
+| makeresults
+| eval CommandLine="powershell.exe -NoProfile -WindowStyle Hidden -EncodedCommand VwByAGkAdABlAC0ASABvAHMAdAAgACIAQwA6AFwAdABlAG0AcABgAHQAZQBzAHQAIgAgADEAMAAwACUAKwA="
 | rex field=CommandLine "(?i)\s[-/]e[a-z]*\s+\"?(?<EncodedCmd>[A-Za-z0-9+/=]{20,})"
 | eval b64=split(replace(EncodedCmd, "[^A-Za-z0-9+/]", ""), "")
 | eval sextet=mvmap(b64, len(mvindex(split("#ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/", b64), 0)) - 1)
@@ -20,5 +22,4 @@ Quick capture for thoughts, questions, and ideas that aren't organized yet.
 | rex field=bitstr max_match=0 "(?<octet>[01]{8})"
 | eval byte=mvfilter(mvmap(octet, tonumber(octet, 2)) != 0)
 | eval DecodedCmd=urldecode(mvjoin(mvmap(byte, "%" . printf("%02X", byte)), ""))
-| fillnull value="N/A" DecodedCmd
-| fields - b64 sextet bitstr octet byte
+| table EncodedCmd DecodedCmd
